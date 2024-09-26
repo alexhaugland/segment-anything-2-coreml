@@ -273,6 +273,8 @@ def main():
                 if epoch % 10 == 0 and step == 0:
                     torch.save(predictor.model.state_dict(), f"model_{epoch}.torch")
                     print(f"save model {epoch}")
+                if step == 0:
+                    torch.save(predictor.model.state_dict(), f"model_latest.torch")
 
                 # Display results
 
