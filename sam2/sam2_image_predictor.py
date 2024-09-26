@@ -62,7 +62,7 @@ class SAM2ImagePredictor:
             (64, 64),
         ]
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def set_image(
         self,
         image: Union[np.ndarray, Image],
@@ -108,7 +108,7 @@ class SAM2ImagePredictor:
         self._is_image_set = True
         logging.info("Image embeddings computed.")
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def set_image_batch(
         self,
         image_list: List[Union[np.ndarray]],
@@ -313,7 +313,7 @@ class SAM2ImagePredictor:
                 mask_input = mask_input[None, :, :, :]
         return mask_input, unnorm_coords, labels, unnorm_box
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def _predict(
         self,
         point_coords: Optional[torch.Tensor],

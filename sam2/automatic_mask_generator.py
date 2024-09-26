@@ -148,7 +148,7 @@ class SAM2AutomaticMaskGenerator:
         self.use_m2m = use_m2m
         self.multimask_output = multimask_output
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def generate(self, image: np.ndarray) -> List[Dict[str, Any]]:
         """
         Generates masks for the given image.

@@ -87,15 +87,15 @@ class SAVDataset:
         else:
             # decode the video
             frames = decode_video(mp4_path)
-            print(f"There are {len(frames)} frames decoded from {mp4_path} (24fps).")
+            # print(f"There are {len(frames)} frames decoded from {mp4_path} (24fps).")
 
             # downsample the frames to align with the annotations
             frames = frames[:: self.annot_sample_rate]
-            print(
-                f"Videos are annotated every {self.annot_sample_rate} frames. "
-                "To align with the annotations, "
-                f"downsample the video to {len(frames)} frames."
-            )
+            # print(
+            #     f"Videos are annotated every {self.annot_sample_rate} frames. "
+            #     "To align with the annotations, "
+            #     f"downsample the video to {len(frames)} frames."
+            # )
             return frames
 
     def get_frames_and_annotations(

@@ -58,7 +58,7 @@ class PositionEmbeddingSine(nn.Module):
         ).flatten(1)
         return pos_x, pos_y
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def encode_boxes(self, x, y, w, h):
         pos_x, pos_y = self._encode_xy(x, y)
         pos = torch.cat((pos_y, pos_x, h[:, None], w[:, None]), dim=1)
@@ -66,7 +66,7 @@ class PositionEmbeddingSine(nn.Module):
 
     encode = encode_boxes  # Backwards compatibility
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def encode_points(self, x, y, labels):
         (bx, nx), (by, ny), (bl, nl) = x.shape, y.shape, labels.shape
         assert bx == by and nx == ny and bx == bl and nx == nl
@@ -75,7 +75,7 @@ class PositionEmbeddingSine(nn.Module):
         pos = torch.cat((pos_y, pos_x, labels[:, :, None]), dim=2)
         return pos
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def forward(self, x: torch.Tensor):
         cache_key = (x.shape[-2], x.shape[-1])
         if cache_key in self.cache:
