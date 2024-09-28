@@ -141,18 +141,18 @@ def main():
         moat_config = MOATBlockConfig(**config)
         block = MOATBlock(moat_config).cuda()
     elif args.block_type == "conv_block":
-        block = ConvMultiScaleBlock(
-            dim=original_block.dim,
-            dim_out=original_block.dim_out,
-            num_heads=original_block.attn.num_heads,
-            mlp_ratio=4.0,
-            drop_path=0.0,
-            norm_layer=original_block.norm1.__class__,
-            q_stride=original_block.q_stride,
-            act_layer=nn.GELU,
-            window_size=original_block.window_size
-        ).cuda()
-        config = {"block_type": "conv_block"}
+        config = {
+            "dim": original_block.dim,
+            "dim_out": original_block.dim_out,
+            "num_heads": original_block.attn.num_heads,
+            "mlp_ratio": 4.0,
+            "drop_path": 0.0,
+            "norm_layer": original_block.norm1.__class__,
+            "q_stride": original_block.q_stride,
+            "act_layer": nn.GELU,
+            "window_size": original_block.window_size
+        }
+        block = ConvMultiScaleBlock(**config).cuda()
     else:
         raise ValueError(f"Unsupported block type: {args.block_type}")
     

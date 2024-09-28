@@ -189,6 +189,7 @@ class ConvMultiScaleAttention(nn.Module):
         self.proj = nn.Conv2d(dim_out, dim_out, kernel_size=1, bias=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x is already in NCHW format
         B, C, H, W = x.shape
         
         qkv = self.qkv(x)
@@ -262,18 +263,17 @@ class ConvMultiScaleBlock(nn.Module):
         num_heads: int,
         mlp_ratio: float = 4.0,
         drop_path: float = 0.0,
-        norm_layer: Union[nn.Module, str] = "GroupNorm",
+        norm_layer: Union[nn.Module, str] = nn.LayerNorm,
         q_stride: Tuple[int, int] = None,
         act_layer: nn.Module = nn.GELU,
         window_size: int = 0,
-        num_groups: int = 32,
     ):
         super().__init__()
 
         self.dim = dim
         self.dim_out = dim_out
         
-        self.norm1 = nn.GroupNorm(num_groups, dim)
+        self.norm1 = norm_layer(dim)
         
         self.window_size = window_size
 
@@ -291,26 +291,32 @@ class ConvMultiScaleBlock(nn.Module):
         )
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
-        self.norm2 = nn.GroupNorm(num_groups, dim_out)
+        self.norm2 = norm_layer(dim_out)
         
         self.mlp = nn.Sequential(
-            nn.Conv2d(dim_out, int(dim_out * mlp_ratio), kernel_size=1),
+            nn.Linear(dim_out, int(dim_out * mlp_ratio)),
             act_layer(),
-            nn.Conv2d(int(dim_out * mlp_ratio), dim_out, kernel_size=1),
+            nn.Linear(int(dim_out * mlp_ratio), dim_out),
         )
 
         if dim != dim_out:
-            self.proj = nn.Conv2d(dim, dim_out, kernel_size=1)
+            self.proj = nn.Linear(dim, dim_out)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, H, W, C]
         shortcut = x
-
+        
         x = self.norm1(x)
+        
+        # Convert to NCHW for convolution operations
+        x = x.permute(0, 3, 1, 2)
 
         if self.dim != self.dim_out:
             shortcut = self.proj(shortcut)
             if self.pool:
+                shortcut = shortcut.permute(0, 3, 1, 2)
                 shortcut = self.pool(shortcut)
+                shortcut = shortcut.permute(0, 2, 3, 1)
 
         if self.window_size > 0:
             x, (Hp, Wp) = window_partition_nchw(x, self.window_size)
@@ -318,8 +324,11 @@ class ConvMultiScaleBlock(nn.Module):
         x = self.attn(x)
 
         if self.window_size > 0:
-            x = window_unpartition_nchw(x, self.window_size, (Hp, Wp), shortcut.shape[2:])
+            x = window_unpartition_nchw(x, self.window_size, (Hp, Wp), shortcut.shape[1:3])
 
+        # Convert back to NHWC
+        x = x.permute(0, 2, 3, 1)
+        
         x = shortcut + self.drop_path(x)
 
         x = x + self.drop_path(self.mlp(self.norm2(x)))
