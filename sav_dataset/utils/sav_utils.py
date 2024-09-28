@@ -121,7 +121,7 @@ class SAVDataset:
         # load the manual annotations
         auto_annot_path = os.path.join(self.sav_dir, video_id + "_auto.json")
         if not os.path.exists(auto_annot_path):
-            print(f"{auto_annot_path} doesn't exist.")
+            # print(f"{auto_annot_path} doesn't exist.")
             auto_annot = None
         else:
             auto_annot = json.load(open(auto_annot_path))

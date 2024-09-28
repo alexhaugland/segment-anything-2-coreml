@@ -1,5 +1,6 @@
 from datetime import datetime
 import torch
+from torch.utils.data import Dataset
 import torch.nn as nn
 import time
 from sam2.build_sam import build_sam2
@@ -84,20 +85,19 @@ def read_video(video_id, sav_dataset):
 
     return Img
 
-class SAVDataset(torch.utils.data.Dataset):
+class SAVTorchDataset(Dataset):
     def __init__(self, sav_dir):
-        self.sav_dataset = SAVDataset(sav_dir)
-        self.video_ids = [f.split(".")[0] for f in os.listdir(sav_dir) if f.endswith(".mp4")]
+        video_ids = [f.split(".")[0] for f in os.listdir(sav_dir) if f.endswith(".mp4")]
+        self.video_ids = video_ids
+        self.dataset = SAVDataset(sav_dir)
 
     def __len__(self):
         return len(self.video_ids)
 
     def __getitem__(self, index):
         video_id = self.video_ids[index]
-        image = None
-        while image is None:
-            image = read_video(video_id, self.sav_dataset)
-        return image
+        video = read_video(video_id, self.dataset)
+        return video
 
 def main():
     feature_collector = create_feature_collector(args.model_cfg, args.checkpoint, args.input_layer, args.output_layer)
@@ -150,7 +150,8 @@ def main():
     
     # Initialize the SAV dataset
     sav_dir = os.path.expanduser("~/mldata/sav_000")  # Update this path if necessary
-    dataset = SAVDataset(sav_dir)
+    
+    dataset = SAVTorchDataset(sav_dir)
     dataloader = DataLoader(dataset, batch_size=args.batch_size, num_workers=4, shuffle=True)
 
     for epoch in range(start_epoch, args.epochs):
@@ -179,7 +180,7 @@ def main():
             epoch_loss += loss_numeric
             num_batches += 1
             batch_duration = time.time() - start_time
-            wandb.log({"num_batches": num_batches, "avg_loss": avg_loss, "batch_duration": batch_duration})
+            wandb.log({"num_batches": num_batches, "loss": loss_numeric, "batch_duration": batch_duration})
 
 
         avg_loss = epoch_loss / num_batches
@@ -187,15 +188,14 @@ def main():
         if (epoch + 1) % 10 == 0:
             print(f"Epoch [{epoch+1}/{args.epochs}], Average Loss: {avg_loss:.4f}")
         
-        # Save checkpoint every 100 epochs
-        if (epoch + 1) % 100 == 0:
-            checkpoint = {
-                'epoch': epoch + 1,
-                'state_dict': moat_block.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'config': config,
-            }
-            torch.save(checkpoint, f"moat_block_checkpoint_epoch_{epoch+1}.pt")
+        # Save checkpoint every epoch, overwriting the previous one
+        checkpoint = {
+            'epoch': epoch + 1,
+            'state_dict': moat_block.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'config': config,
+        }
+        torch.save(checkpoint, "moat_block_checkpoint_latest.pt")
     
     print("Training completed.")
     
