@@ -9,6 +9,9 @@ import numpy as np
 import argparse
 import wandb
 import os
+from torch.utils.data import DataLoader
+from sav_dataset.utils.sav_utils import SAVDataset
+import cv2
 
 parser = argparse.ArgumentParser(description="Train a MOAT block to match SAM2 output")
 parser.add_argument("--epochs", type=int, default=10000, help="Number of training epochs")
@@ -53,6 +56,48 @@ def create_feature_collector(model_cfg, checkpoint_path, input_layer, output_lay
     predictor = SAM2ImagePredictor(sam2_model)
     feature_collector = FeatureCollector(predictor, input_layer, output_layer)
     return feature_collector
+
+def read_video(video_id, sav_dataset):
+    frames, manual_annot, _ = sav_dataset.get_frames_and_annotations(video_id)
+
+    if frames is None or manual_annot is None:
+        return None, None, None
+
+    # Randomly select a frame
+    frame_idx = np.random.randint(len(frames))
+    Img = frames[frame_idx]
+    r = np.min([1024 / Img.shape[1], 1024 / Img.shape[0]])  # scaling factor
+    Img = cv2.resize(Img, (int(Img.shape[1] * r), int(Img.shape[0] * r)))
+    orig_shape = Img.shape
+
+    # Pad the image to 1024x1024
+    if Img.shape[0] < 1024:
+        Img = np.concatenate(
+            [Img, np.zeros([1024 - Img.shape[0], Img.shape[1], 3], dtype=np.uint8)],
+            axis=0,
+        )
+    if Img.shape[1] < 1024:
+        Img = np.concatenate(
+            [Img, np.zeros([Img.shape[0], 1024 - Img.shape[1], 3], dtype=np.uint8)],
+            axis=1,
+        )
+
+    return Img
+
+class SAVDataset(torch.utils.data.Dataset):
+    def __init__(self, sav_dir):
+        self.sav_dataset = SAVDataset(sav_dir)
+        self.video_ids = [f.split(".")[0] for f in os.listdir(sav_dir) if f.endswith(".mp4")]
+
+    def __len__(self):
+        return len(self.video_ids)
+
+    def __getitem__(self, index):
+        video_id = self.video_ids[index]
+        image = None
+        while image is None:
+            image = read_video(video_id, self.sav_dataset)
+        return image
 
 def main():
     feature_collector = create_feature_collector(args.model_cfg, args.checkpoint, args.input_layer, args.output_layer)
@@ -103,37 +148,47 @@ def main():
         name=f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
     )
     
+    # Initialize the SAV dataset
+    sav_dir = os.path.expanduser("~/mldata/sav_000")  # Update this path if necessary
+    dataset = SAVDataset(sav_dir)
+    dataloader = DataLoader(dataset, batch_size=args.batch_size, num_workers=4, shuffle=True)
+
     for epoch in range(start_epoch, args.epochs):
         start_time = time.time()
-        # Generate a batch of random images
-        batch_size = 2
-        dummy_images = [np.random.rand(1024, 1024, 3).astype(np.float32) for _ in range(batch_size)]
-        
-        # Collect features from the original model
-        original_input, original_output = feature_collector.collect_features(dummy_images)
-        
-        # Pass the same input through our MOAT block
-        moat_output = moat_block(original_input.permute(0, 3, 1, 2))
-        
-        # Compute loss
-        loss = criterion(moat_output, original_output.permute(0, 3, 1, 2))
-        loss_numeric = loss.item()
+        epoch_loss = 0.0
+        num_batches = 0
 
+        for batch_images in dataloader:
+            batch_images = [img.numpy() for img in batch_images]
+            
+            # Collect features from the original model
+            original_input, original_output = feature_collector.collect_features(batch_images)
+            
+            # Pass the same input through our MOAT block
+            moat_output = moat_block(original_input.permute(0, 3, 1, 2))
+            
+            # Compute loss
+            loss = criterion(moat_output, original_output.permute(0, 3, 1, 2))
+            loss_numeric = loss.item()
+            
+            # Backpropagate and optimize
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            epoch_loss += loss_numeric
+            num_batches += 1
+            batch_duration = time.time() - start_time
+            wandb.log({"num_batches": num_batches, "avg_loss": avg_loss, "batch_duration": batch_duration})
+
+
+        avg_loss = epoch_loss / num_batches
         
+        if (epoch + 1) % 10 == 0:
+            print(f"Epoch [{epoch+1}/{args.epochs}], Average Loss: {avg_loss:.4f}")
         
-        # Backpropagate and optimize
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        
+        # Save checkpoint every 100 epochs
         if (epoch + 1) % 100 == 0:
-            print(f"Epoch [{epoch+1}/{args.epochs}], Loss: {loss_numeric:.4f}")
-        
-        epoch_duration = time.time() - start_time
-        wandb.log({"epoch": epoch, "loss": loss_numeric, "epoch_duration": epoch_duration})
-        
-        # Save checkpoint every 1000 epochs
-        if (epoch + 1) % 1000 == 0:
             checkpoint = {
                 'epoch': epoch + 1,
                 'state_dict': moat_block.state_dict(),
