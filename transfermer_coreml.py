@@ -21,7 +21,7 @@ def export_sam2_block(model_cfg, checkpoint_path):
     sam2_block = predictor.model.image_encoder.trunk.blocks[0]
     
     # note that these are DIFFERENT
-    # Create a dummy input (batch size 1, channels 96, height 256, width 256)
+    # Create a dummy input (batch size 1, height 256, width 256, channels 96)
     dummy_input = torch.randn(1, 256, 256, 96)
     
     # Trace the model
