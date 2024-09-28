@@ -10,3 +10,5 @@ outputs/*
 checkpoints/*.pt
 wandb/*
 model*.torch
+*.mlpackage
+*.pt

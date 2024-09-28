@@ -8,6 +8,19 @@ from sam2.modeling.vision_transformers.moat import MOATBlock, MOATBlockConfig
 import numpy as np
 import argparse
 import wandb
+import os
+
+parser = argparse.ArgumentParser(description="Train a MOAT block to match SAM2 output")
+parser.add_argument("--epochs", type=int, default=10000, help="Number of training epochs")
+parser.add_argument("--batch_size", type=int, default=2, help="Batch size for training")
+parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
+parser.add_argument("--model_cfg", type=str, default="sam2_hiera_t.yaml", help="SAM2 model configuration file")
+parser.add_argument("--checkpoint", type=str, default="checkpoints/sam2_hiera_tiny.pt", help="SAM2 checkpoint file")
+parser.add_argument("--input_layer", type=str, default="image_encoder.trunk.blocks.0", help="Input layer for feature collection")
+parser.add_argument("--output_layer", type=str, default="image_encoder.trunk.blocks.1", help="Output layer for feature collection")
+parser.add_argument("--resume", type=str, default=None, help="Path to saved MOAT block snapshot to resume training")
+
+args = parser.parse_args()
 
 class FeatureCollector(nn.Module):
     def __init__(self, predictor, input_layer, output_layer):
@@ -42,16 +55,7 @@ def create_feature_collector(model_cfg, checkpoint_path, input_layer, output_lay
     return feature_collector
 
 def main():
-    parser = argparse.ArgumentParser(description="Train a MOAT block to match SAM2 output")
-    parser.add_argument("--epochs", type=int, default=1000, help="Number of training epochs")
-    args = parser.parse_args()
-
-    model_cfg = "sam2_hiera_t.yaml"
-    sam2_checkpoint = "checkpoints/sam2_hiera_tiny.pt"
-    input_layer = 'image_encoder.trunk.blocks.0'
-    output_layer = 'image_encoder.trunk.blocks.1'
-    
-    feature_collector = create_feature_collector(model_cfg, sam2_checkpoint, input_layer, output_layer)
+    feature_collector = create_feature_collector(args.model_cfg, args.checkpoint, args.input_layer, args.output_layer)
     
     # Get the configuration of the original Hiera block
     original_block = feature_collector.predictor.model.image_encoder.trunk.blocks[0]
@@ -69,27 +73,37 @@ def main():
         "expand_ratio": 1,
         "id_skip": True,
         "se_ratio": None,
-        "attention_mode": "local", # somehow this adds a list of size window * window
+        "attention_mode": "local",
         "split_head": True
     }
     # Create a MOATBlockConfig
-    moat_config = MOATBlockConfig(
-        **config
-    )
+    moat_config = MOATBlockConfig(**config)
     
     # Instantiate a new MOAT block with the configuration
     moat_block = MOATBlock(moat_config).cuda()
     
-    optimizer = torch.optim.Adam(moat_block.parameters(), lr=1e-4)
+    # Resume from snapshot if specified
+    start_epoch = 0
+    if args.resume:
+        if os.path.isfile(args.resume):
+            print(f"Loading checkpoint '{args.resume}'")
+            checkpoint = torch.load(args.resume)
+            moat_block.load_state_dict(checkpoint['state_dict'])
+            start_epoch = checkpoint['epoch']
+            print(f"Loaded checkpoint '{args.resume}' (epoch {start_epoch})")
+        else:
+            print(f"No checkpoint found at '{args.resume}'")
+    
+    optimizer = torch.optim.Adam(moat_block.parameters(), lr=args.lr)
     criterion = nn.MSELoss()
     
-
     wandb.init(
         project="transfermer",
         config=config,
         name=f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
     )
-    for epoch in range(args.epochs):
+    
+    for epoch in range(start_epoch, args.epochs):
         start_time = time.time()
         # Generate a batch of random images
         batch_size = 2
@@ -117,11 +131,27 @@ def main():
         
         epoch_duration = time.time() - start_time
         wandb.log({"epoch": epoch, "loss": loss_numeric, "epoch_duration": epoch_duration})
+        
+        # Save checkpoint every 1000 epochs
+        if (epoch + 1) % 1000 == 0:
+            checkpoint = {
+                'epoch': epoch + 1,
+                'state_dict': moat_block.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'config': config,
+            }
+            torch.save(checkpoint, f"moat_block_checkpoint_epoch_{epoch+1}.pt")
     
     print("Training completed.")
     
-    # Save the trained MOAT block
-    torch.save(moat_block.state_dict(), "trained_moat_block.pt")
+    # Save the final trained MOAT block
+    final_checkpoint = {
+        'epoch': epoch,
+        'state_dict': moat_block.state_dict(),
+        'optimizer': optimizer.state_dict(),
+        'config': config,
+    }
+    torch.save(final_checkpoint, "trained_moat_block.pt")
     print("Trained MOAT block saved to trained_moat_block.pt")
 
 if __name__ == "__main__":
