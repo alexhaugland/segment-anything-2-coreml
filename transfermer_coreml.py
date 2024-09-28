@@ -4,30 +4,24 @@ import coremltools as ct
 from sam2.build_sam import build_sam2
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 from sam2.modeling.vision_transformers.moat import MOATBlock, MOATBlockConfig
+from sam2.modeling.backbones.hieradet import ConvMultiScaleBlock
 import argparse
-from hydra import compose
-from hydra.utils import instantiate
-from omegaconf import OmegaConf
 from coremltools.converters.mil._deployment_compatibility import AvailableTarget
 from coremltools.converters.mil.mil.passes.defs.quantization import ComputePrecision
 
 
-parser = argparse.ArgumentParser(description="Export SAM2 block and MOAT block to Core ML")
+parser = argparse.ArgumentParser(description="Export SAM2 block and custom block to Core ML")
 parser.add_argument("--model_cfg", type=str, default="sam2_hiera_t.yaml", help="SAM2 model configuration file")
 parser.add_argument("--checkpoint", type=str, default="checkpoints/sam2_hiera_tiny.pt", help="SAM2 checkpoint file")
-parser.add_argument("--moat_checkpoint", type=str, default=None, help="Path to trained MOAT block checkpoint (optional)")
+parser.add_argument("--custom_checkpoint", type=str, default=None, help="Path to trained custom block checkpoint (optional)")
+parser.add_argument("--block_type", type=str, default="conv_block", choices=["moat_block", "conv_block"], help="Type of block to export")
 args = parser.parse_args()
 
 
-
-def export_sam2_block(model_cfg, checkpoint_path):
-    sam2_model = build_sam2(model_cfg, checkpoint_path, device="cpu")
-    predictor = SAM2ImagePredictor(sam2_model)
-    
+def export_sam2_block(sam2_model):
     # Extract the first block of the image encoder
-    sam2_block = predictor.model.image_encoder.trunk.blocks[0]
+    sam2_block = sam2_model.image_encoder.trunk.blocks[0]
     
-    # note that these are DIFFERENT
     # Create a dummy input (batch size 1, height 256, width 256, channels 96)
     dummy_input = torch.randn(1, 256, 256, 96)
     
@@ -47,48 +41,68 @@ def export_sam2_block(model_cfg, checkpoint_path):
     model.save("sam2_block.mlpackage")
     print("SAM2 block exported to sam2_block.mlpackage")
 
-def export_moat_block(moat_checkpoint_path=None):
-    if moat_checkpoint_path:
-        # Load the trained MOAT block
-        checkpoint = torch.load(moat_checkpoint_path, map_location="cpu")
+def export_custom_block(block_type, sam2_model, custom_checkpoint_path=None):
+    original_block = sam2_model.image_encoder.trunk.blocks[0]
+    
+    if custom_checkpoint_path:
+        # Load the trained custom block
+        checkpoint = torch.load(custom_checkpoint_path, map_location="cpu")
         config = checkpoint['config']
-        moat_config = MOATBlockConfig(**config)
-        moat_block = MOATBlock(moat_config)
-        moat_block.load_state_dict(checkpoint['state_dict'])
+        if block_type == "moat_block":
+            moat_config = MOATBlockConfig(**config)
+            block = MOATBlock(moat_config)
+        elif block_type == "conv_block":
+            block = ConvMultiScaleBlock(**config)
+        else:
+            raise ValueError(f"Unsupported block type: {block_type}")
+        block.load_state_dict(checkpoint['state_dict'])
     else:
-        # Use default configuration from transfermer.py
-        cfg = compose(config_name=args.model_cfg)
-        OmegaConf.resolve(cfg)
-        
-        original_block_dim = cfg.model.image_encoder.trunk.embed_dim
-        original_block_dim_out = cfg.model.image_encoder.trunk.embed_dim
-        
-        config = {
-            "block_name": "moat_block",
-            "window_size": [4, 4],
-            "attn_norm_class": nn.LayerNorm,
-            "head_dim": 16,
-            "activation": nn.GELU(),
-            "kernel_size": 3,
-            "stride": 1,
-            "input_filters": original_block_dim,
-            "output_filters": original_block_dim_out,
-            "expand_ratio": 1,
-            "id_skip": False,
-            "se_ratio": None,
-            "attention_mode": "local",
-            "split_head": True
-        }
-        moat_config = MOATBlockConfig(**config)
-        moat_block = MOATBlock(moat_config)
+        # Use configuration from the SAM2 model
+        if block_type == "moat_block":
+            config = {
+                "block_name": "moat_block",
+                "window_size": [4, 4],
+                "attn_norm_class": original_block.norm1.__class__,
+                "head_dim": 16,
+                "activation": nn.GELU(),
+                "kernel_size": 3,
+                "stride": 1,
+                "input_filters": original_block.dim,
+                "output_filters": original_block.dim_out,
+                "expand_ratio": 1,
+                "id_skip": False,
+                "se_ratio": None,
+                "attention_mode": "local",
+                "split_head": True
+            }
+            moat_config = MOATBlockConfig(**config)
+            block = MOATBlock(moat_config)
+        elif block_type == "conv_block":
+            config = {
+                "dim": original_block.dim,
+                "dim_out": original_block.dim_out,
+                "num_heads": original_block.attn.num_heads,
+                "mlp_ratio": 4.0,
+                "drop_path": 0.0,
+                "norm_layer": original_block.norm1.__class__,
+                "q_stride": original_block.q_stride,
+                "act_layer": nn.GELU,
+                "window_size": original_block.window_size
+            }
+            block = ConvMultiScaleBlock(**config)
+        else:
+            raise ValueError(f"Unsupported block type: {block_type}")
     
-    moat_block.eval()
+    block.eval()
     
-    # Create a dummy input (batch size 1, channels 96, height 256, width 256)
-    dummy_input = torch.randn(1, moat_config.input_filters, 256, 256)
+    # Create a dummy input
+    if block_type == "moat_block":
+        dummy_input = torch.randn(1, config["input_filters"], 256, 256)
+    else:  # conv_block
+        dummy_input = torch.randn(1, 256, 256, config["dim"])
     
     # Trace the model
-    traced_model = torch.jit.trace(moat_block, dummy_input)
+    traced_model = torch.jit.trace(block, dummy_input)
     
     # Convert to Core ML
     model = ct.convert(
@@ -100,15 +114,18 @@ def export_moat_block(moat_checkpoint_path=None):
     )
     
     # Save the model
-    model.save("moat_block.mlpackage")
-    print("MOAT block exported to moat_block.mlpackage")
+    model.save(f"{block_type}.mlpackage")
+    print(f"{block_type} exported to {block_type}.mlpackage")
 
 def main():
-    # Export SAM2 block
-    export_sam2_block(args.model_cfg, args.checkpoint)
+    # Load the SAM2 model
+    sam2_model = build_sam2(args.model_cfg, args.checkpoint, device="cpu")
     
-    # Export MOAT block
-    export_moat_block(args.moat_checkpoint)
+    # Export SAM2 block
+    export_sam2_block(sam2_model)
+    
+    # Export custom block
+    export_custom_block(args.block_type, sam2_model, args.custom_checkpoint)
 
 if __name__ == "__main__":
     main()

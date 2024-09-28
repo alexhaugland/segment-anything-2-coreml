@@ -6,6 +6,7 @@ import time
 from sam2.build_sam import build_sam2
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 from sam2.modeling.vision_transformers.moat import MOATBlock, MOATBlockConfig
+from sam2.modeling.backbones.hieradet import ConvMultiScaleBlock
 import numpy as np
 import argparse
 import wandb
@@ -13,6 +14,7 @@ import os
 from torch.utils.data import DataLoader
 from sav_dataset.utils.sav_utils import SAVDataset
 import cv2
+import torch.nn.functional as F
 
 parser = argparse.ArgumentParser(description="Train a MOAT block to match SAM2 output")
 parser.add_argument("--epochs", type=int, default=10000, help="Number of training epochs")
@@ -22,6 +24,7 @@ parser.add_argument("--model_cfg", type=str, default="sam2_hiera_t.yaml", help="
 parser.add_argument("--checkpoint", type=str, default="checkpoints/sam2_hiera_tiny.pt", help="SAM2 checkpoint file")
 parser.add_argument("--input_layer", type=str, default="image_encoder.trunk.blocks.0", help="Input layer for feature collection")
 parser.add_argument("--output_layer", type=str, default="image_encoder.trunk.blocks.1", help="Output layer for feature collection")
+parser.add_argument("--block_type", type=str, default="moat_block", choices=["moat_block", "conv_block"], help="Type of block to create")
 parser.add_argument("--resume", type=str, default=None, help="Path to saved MOAT block snapshot to resume training")
 
 args = parser.parse_args()
@@ -52,9 +55,12 @@ class FeatureCollector(nn.Module):
         self.predictor.set_image_batch(image)
         return self.features[self.input_layer], self.features[self.output_layer]
 
-def create_feature_collector(model_cfg, checkpoint_path, input_layer, output_layer):
+def create_sam_model(model_cfg, checkpoint_path):
     sam2_model = build_sam2(model_cfg, checkpoint_path, device="cuda")
     predictor = SAM2ImagePredictor(sam2_model)
+    return predictor
+
+def create_feature_collector(predictor, input_layer, output_layer):
     feature_collector = FeatureCollector(predictor, input_layer, output_layer)
     return feature_collector
 
@@ -99,33 +105,56 @@ class SAVTorchDataset(Dataset):
         video = read_video(video_id, self.dataset)
         return video
 
+def reduce_precision(module):
+    for param in module.parameters():
+        param.data = param.data.half()  # Convert to half precision
+    return module
+
 def main():
-    feature_collector = create_feature_collector(args.model_cfg, args.checkpoint, args.input_layer, args.output_layer)
+    # Create SAM model
+    sam_predictor = create_sam_model(args.model_cfg, args.checkpoint)
+    
+    # Create feature collector
+    feature_collector = create_feature_collector(sam_predictor, args.input_layer, args.output_layer)
     
     # Get the configuration of the original Hiera block
-    original_block = feature_collector.predictor.model.image_encoder.trunk.blocks[0]
+    original_block = sam_predictor.model.image_encoder.trunk.blocks[0]
     
-    config = {
-        "block_name": "moat_block",
-        "window_size": [16, 16],
-        "attn_norm_class": original_block.norm1.__class__,
-        "head_dim": 16,
-        "activation": nn.GELU(),
-        "kernel_size": 3,
-        "stride": 1,
-        "input_filters": original_block.dim,
-        "output_filters": original_block.dim_out,
-        "expand_ratio": 1,
-        "id_skip": True,
-        "se_ratio": None,
-        "attention_mode": "local",
-        "split_head": True
-    }
-    # Create a MOATBlockConfig
-    moat_config = MOATBlockConfig(**config)
-    
-    # Instantiate a new MOAT block with the configuration
-    moat_block = MOATBlock(moat_config).cuda()
+    if args.block_type == "moat_block":
+        config = {
+            "block_name": args.block_type,
+            "window_size": [16, 16],
+            "attn_norm_class": original_block.norm1.__class__,
+            "head_dim": 16,
+            "activation": nn.GELU(),
+            "kernel_size": 3,
+            "stride": 1,
+            "input_filters": original_block.dim,
+            "output_filters": original_block.dim_out,
+            "expand_ratio": 1,
+            "id_skip": True,
+            "se_ratio": None,
+            "attention_mode": "local",
+            "split_head": True
+        }
+        # Create a MOATBlockConfig
+        moat_config = MOATBlockConfig(**config)
+        block = MOATBlock(moat_config).cuda()
+    elif args.block_type == "conv_block":
+        block = ConvMultiScaleBlock(
+            dim=original_block.dim,
+            dim_out=original_block.dim_out,
+            num_heads=original_block.attn.num_heads,
+            mlp_ratio=4.0,
+            drop_path=0.0,
+            norm_layer=original_block.norm1.__class__,
+            q_stride=original_block.q_stride,
+            act_layer=nn.GELU,
+            window_size=original_block.window_size
+        ).cuda()
+        config = {"block_type": "conv_block"}
+    else:
+        raise ValueError(f"Unsupported block type: {args.block_type}")
     
     # Resume from snapshot if specified
     start_epoch = 0
@@ -133,13 +162,13 @@ def main():
         if os.path.isfile(args.resume):
             print(f"Loading checkpoint '{args.resume}'")
             checkpoint = torch.load(args.resume)
-            moat_block.load_state_dict(checkpoint['state_dict'])
+            block.load_state_dict(checkpoint['state_dict'])
             start_epoch = checkpoint['epoch']
             print(f"Loaded checkpoint '{args.resume}' (epoch {start_epoch})")
         else:
             print(f"No checkpoint found at '{args.resume}'")
     
-    optimizer = torch.optim.Adam(moat_block.parameters(), lr=args.lr)
+    optimizer = torch.optim.Adam(block.parameters(), lr=args.lr)
     criterion = nn.MSELoss()
     
     wandb.init(
@@ -165,22 +194,27 @@ def main():
             # Collect features from the original model
             original_input, original_output = feature_collector.collect_features(batch_images)
             
-            # Pass the same input through our MOAT block
-            moat_output = moat_block(original_input.permute(0, 3, 1, 2))
+            # Pass the same input through our block
+            if args.block_type == "moat_block":
+                block_output = block(original_input.permute(0, 3, 1, 2))
+            else:  # conv_block
+                block_output = block(original_input)
             
             # Compute loss
-            loss = criterion(moat_output, original_output.permute(0, 3, 1, 2))
-            loss_numeric = loss.item()
+            if args.block_type == "moat_block":
+                loss = criterion(block_output, original_output.permute(0, 3, 1, 2))
+            else:  # conv_block
+                loss = criterion(block_output, original_output)
             
             # Backpropagate and optimize
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
-            epoch_loss += loss_numeric
+            epoch_loss += loss.item()
             num_batches += 1
             batch_duration = time.time() - start_time
-            wandb.log({"num_batches": num_batches, "loss": loss_numeric, "batch_duration": batch_duration})
+            wandb.log({"num_batches": num_batches, "loss": loss.item(), "batch_duration": batch_duration})
 
 
         avg_loss = epoch_loss / num_batches
@@ -191,23 +225,23 @@ def main():
         # Save checkpoint every epoch, overwriting the previous one
         checkpoint = {
             'epoch': epoch + 1,
-            'state_dict': moat_block.state_dict(),
+            'state_dict': block.state_dict(),
             'optimizer': optimizer.state_dict(),
             'config': config,
         }
-        torch.save(checkpoint, "moat_block_checkpoint_latest.pt")
+        torch.save(checkpoint, f"{args.block_type}_checkpoint_latest.pt")
     
     print("Training completed.")
     
     # Save the final trained MOAT block
     final_checkpoint = {
         'epoch': epoch,
-        'state_dict': moat_block.state_dict(),
+        'state_dict': block.state_dict(),
         'optimizer': optimizer.state_dict(),
         'config': config,
     }
-    torch.save(final_checkpoint, "trained_moat_block.pt")
-    print("Trained MOAT block saved to trained_moat_block.pt")
+    torch.save(final_checkpoint, f"trained_{args.block_type}.pt")
+    print(f"Trained {args.block_type} saved to trained_{args.block_type}.pt")
 
 if __name__ == "__main__":
     main()
