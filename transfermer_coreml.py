@@ -84,10 +84,11 @@ def export_custom_block(block_type, sam2_model, custom_checkpoint_path=None):
                 "num_heads": original_block.attn.num_heads,
                 "mlp_ratio": 4.0,
                 "drop_path": 0.0,
-                "norm_layer": "LayerNorm", #ignored
+                "norm_layer": "GroupNorm",
                 "q_stride": original_block.q_stride,
                 "act_layer": nn.GELU,
-                "window_size": original_block.window_size
+                "window_size": original_block.window_size,
+                "num_groups": 32
             }
             block = ConvMultiScaleBlock(**config)
         else:
@@ -95,11 +96,8 @@ def export_custom_block(block_type, sam2_model, custom_checkpoint_path=None):
     
     block.eval()
     
-    # Create a dummy input
-    if block_type == "moat_block":
-        dummy_input = torch.randn(1, config["input_filters"], 256, 256)
-    else:  # conv_block
-        dummy_input = torch.randn(1, config["dim"], 256, 256)
+    # Create a dummy input (now in NCHW format)
+    dummy_input = torch.randn(1, config["dim"], 256, 256)
     
     # Trace the model
     traced_model = torch.jit.trace(block, dummy_input)
