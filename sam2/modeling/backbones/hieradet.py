@@ -190,29 +190,24 @@ class ConvMultiScaleAttention(nn.Module):
         self.proj = nn.Conv2d(dim_out, dim_out, kernel_size=1, bias=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, H, W, C = x.shape
-        x = x.permute(0, 3, 1, 2)  # (B, C, H, W)
+        B, C, H, W = x.shape
         
         qkv = self.qkv(x)
-        qkv = qkv.view(B, 3, self.num_heads, self.dim_out // self.num_heads, H * W)
+        qkv = qkv.reshape(B, 3, self.num_heads, self.dim_out // self.num_heads, H * W)
         qkv = qkv.permute(1, 0, 2, 4, 3)  # (3, B, num_heads, H*W, C)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
         # Q pooling (for downsample at stage changes)
         if self.q_pool:
-            q = self.q_pool(q.view(B, -1, H, W))
+            q = self.q_pool(q.transpose(2, 3).reshape(B, -1, H, W))
             H, W = q.shape[2:]  # downsampled shape
-            q = q.view(B, self.num_heads, H * W, -1)
+            q = q.reshape(B, self.num_heads, H * W, -1)
 
-        # Attention
-        attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn = attn.softmax(dim=-1)
-        x = (attn @ v).transpose(2, 3).contiguous()
-        x = x.view(B, self.dim_out, H, W)
+        # Use F.scaled_dot_product_attention
+        x = F.scaled_dot_product_attention(q, k, v)
+        x = x.transpose(2, 3).reshape(B, self.dim_out, H, W)
 
         x = self.proj(x)
-        x = x.permute(0, 2, 3, 1)  # (B, H, W, C)
-
         return x
 
 
@@ -236,7 +231,7 @@ class ConvMultiScaleBlock(nn.Module):
 
         self.dim = dim
         self.dim_out = dim_out
-        self.norm1 = norm_layer(dim)
+        self.norm1 = nn.GroupNorm(1, dim)  # Use GroupNorm instead of LayerNorm
 
         self.window_size = window_size
 
@@ -254,7 +249,7 @@ class ConvMultiScaleBlock(nn.Module):
         )
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
-        self.norm2 = norm_layer(dim_out)
+        self.norm2 = nn.GroupNorm(1, dim_out)  # Use GroupNorm instead of LayerNorm
         self.mlp = nn.Sequential(
             nn.Conv2d(dim_out, int(dim_out * mlp_ratio), kernel_size=1),
             act_layer(),
@@ -265,43 +260,44 @@ class ConvMultiScaleBlock(nn.Module):
             self.proj = nn.Conv2d(dim, dim_out, kernel_size=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        shortcut = x  # B, H, W, C
+        # x: B, C, H, W
+        shortcut = x
+
+        # Normalization
         x = self.norm1(x)
 
         # Skip connection
         if self.dim != self.dim_out:
-            shortcut = shortcut.permute(0, 3, 1, 2)  # B, C, H, W
             shortcut = self.proj(shortcut)
             if self.pool:
                 shortcut = self.pool(shortcut)
-            shortcut = shortcut.permute(0, 2, 3, 1)  # B, H, W, C
 
         # Window partition
-        window_size = self.window_size
-        if window_size > 0:
-            H, W = x.shape[1], x.shape[2]
-            x, pad_hw = window_partition(x, window_size)
+        if self.window_size > 0:
+            H, W = x.shape[2], x.shape[3]
+            x = window_partition(x.permute(0, 2, 3, 1), self.window_size)[0]
+            x = x.permute(0, 3, 1, 2)  # B, C, H, W
 
-        # Window Attention + Q Pooling (if stage change)
+        # Attention + Q Pooling (if stage change)
         x = self.attn(x)
+
         if self.q_stride:
             # Shapes have changed due to Q pooling
             window_size = self.window_size // self.q_stride[0]
-            H, W = shortcut.shape[1:3]
-
-            pad_h = (window_size - H % window_size) % window_size
-            pad_w = (window_size - W % window_size) % window_size
-            pad_hw = (H + pad_h, W + pad_w)
+            H, W = shortcut.shape[2:]
 
         # Reverse window partition
         if self.window_size > 0:
-            x = window_unpartition(x, window_size, pad_hw, (H, W))
+            pad_h = (self.window_size - H % self.window_size) % self.window_size
+            pad_w = (self.window_size - W % self.window_size) % self.window_size
+            pad_hw = (H + pad_h, W + pad_w)
+            x = window_unpartition(x.permute(0, 2, 3, 1), self.window_size, pad_hw, (H, W))
+            x = x.permute(0, 3, 1, 2)  # B, C, H, W
 
         x = shortcut + self.drop_path(x)
+
         # MLP
-        x_mlp = self.norm2(x).permute(0, 3, 1, 2)  # B, C, H, W
-        x_mlp = self.mlp(x_mlp).permute(0, 2, 3, 1)  # B, H, W, C
-        x = x + self.drop_path(x_mlp)
+        x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
 
 
