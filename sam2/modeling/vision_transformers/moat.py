@@ -12,13 +12,13 @@ import math
 from typing import Optional, Sequence, Any, Tuple
 
 import collections
-from vision_transformers.attention_utils import (
+from sam2.modeling.vision_transformers.attention_utils import (
     WindowAttention,
     PEType,
     window_partition,
     window_reverse,
 )
-from vision_transformers.mbconv import MBConvBlock
+from sam2.modeling.vision_transformers.mbconv import MBConvBlock
 import torch
 from torch import nn
 from torch.nn import GELU
