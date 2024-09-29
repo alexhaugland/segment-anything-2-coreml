@@ -185,6 +185,7 @@ class ConvMultiScaleAttention(nn.Module):
         self.scale = self.head_dim ** -0.5
 
         self.q_pool = q_pool
+        # Replace Conv2d with Linear equivalent (1x1 Conv)
         self.qkv = nn.Conv2d(dim, dim_out * 3, kernel_size=1, bias=True)
         self.proj = nn.Conv2d(dim_out, dim_out, kernel_size=1, bias=True)
 
@@ -193,16 +194,23 @@ class ConvMultiScaleAttention(nn.Module):
         B, C, H, W = x.shape
         
         qkv = self.qkv(x)
-        qkv = qkv.reshape(B, 3, self.num_heads, self.head_dim, H * W).permute(1, 0, 2, 4, 3)
-        q, k, v = qkv[0], qkv[1], qkv[2]
+        qkv = qkv.reshape(B, 3, self.num_heads, self.head_dim, H * W)
+        q, k, v = qkv.unbind(1)
 
         if self.q_pool:
-            q = self.q_pool(q.transpose(1, 2).reshape(B, -1, H, W))
+            q = self.q_pool(qkv[:, 0].reshape(B, -1, H, W))
             H, W = q.shape[2:]
-            q = q.reshape(B, self.num_heads, H * W, -1)
+            q = q.reshape(B, self.num_heads, self.head_dim, H * W)
+        else:
+            q = q.reshape(B, self.num_heads, self.head_dim, H * W)
 
-        x = F.scaled_dot_product_attention(q, k, v)
-        x = x.transpose(2, 3).reshape(B, -1, H, W)
+        k = k.reshape(B, self.num_heads, self.head_dim, H * W)
+        v = v.reshape(B, self.num_heads, self.head_dim, H * W)
+
+        attn = (q.transpose(-2, -1) @ k) * self.scale
+        attn = attn.softmax(dim=-1)
+
+        x = (v @ attn.transpose(-2, -1)).reshape(B, -1, H, W)
         x = self.proj(x)
         return x
 
