@@ -4,7 +4,7 @@ import coremltools as ct
 from sam2.build_sam import build_sam2
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 from sam2.modeling.vision_transformers.moat import MOATBlock, MOATBlockConfig
-from sam2.modeling.backbones.hieradet import ConvMultiScaleBlock
+from sam2.modeling.backbones.conv_multiscale_block import ConvMultiScaleBlock
 import argparse
 from coremltools.converters.mil._deployment_compatibility import AvailableTarget
 from coremltools.converters.mil.mil.passes.defs.quantization import ComputePrecision
@@ -20,13 +20,12 @@ parser.add_argument("--iterate_layers", action="store_true", help="Iterate over 
 parser.add_argument("--output_dir", type=str, default="output", help="Directory to save the exported models")
 args = parser.parse_args()
 
-
 def export_sam2_block(sam2_model):
     # Extract the first block of the image encoder
     sam2_block = sam2_model.image_encoder.trunk.blocks[0]
     
-    # Create a dummy input (batch size 1, height 256, width 256, channels 96)
-    dummy_input = torch.randn(1, 256, 256, 96)
+    # Create a dummy input (batch size 1, channels 96, height 256, width 256)
+    dummy_input = torch.randn(1, 96, 256, 256)
     
     # Trace the model
     traced_model = torch.jit.trace(sam2_block, dummy_input)
@@ -87,7 +86,6 @@ def export_custom_block(block_type, sam2_model, custom_checkpoint_path=None, ite
                 "num_heads": original_block.attn.num_heads,
                 "mlp_ratio": 4.0,
                 "drop_path": 0.0,
-                "norm_layer": nn.LayerNorm,
                 "q_stride": original_block.q_stride,
                 "act_layer": nn.GELU,
                 "window_size": original_block.window_size,

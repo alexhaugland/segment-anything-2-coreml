@@ -6,7 +6,7 @@ import time
 from sam2.build_sam import build_sam2
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 from sam2.modeling.vision_transformers.moat import MOATBlock, MOATBlockConfig
-from sam2.modeling.backbones.hieradet import ConvMultiScaleBlock
+from sam2.modeling.backbones.conv_multiscale_block import ConvMultiScaleBlock
 import numpy as np
 import argparse
 import wandb
@@ -147,7 +147,6 @@ def main():
             "num_heads": original_block.attn.num_heads,
             "mlp_ratio": 4.0,
             "drop_path": 0.0,
-            "norm_layer": original_block.norm1.__class__,
             "q_stride": original_block.q_stride,
             "act_layer": nn.GELU,
             "window_size": original_block.window_size
