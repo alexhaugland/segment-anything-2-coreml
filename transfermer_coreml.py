@@ -95,8 +95,8 @@ def export_custom_block(block_type, sam2_model, custom_checkpoint_path=None):
     
     block.eval()
     
-    # Create a dummy input (in NHWC format for LayerNorm compatibility)
-    dummy_input = torch.randn(1, 256, 256, config["dim" if "dim" in config else "input_filters"])
+    # Create a dummy input in NCHW format
+    dummy_input = torch.randn(1, config["dim" if "dim" in config else "input_filters"], 256, 256)
     
     # Trace the model
     traced_model = torch.jit.trace(block, dummy_input)

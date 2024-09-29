@@ -281,7 +281,9 @@ class ConvMultiScaleBlock(nn.Module):
         self.dim = dim
         self.dim_out = dim_out
         
-        self.norm1 = norm_layer(dim)
+        # Change LayerNorm to BatchNorm2d for NCHW format
+        self.norm1 = nn.BatchNorm2d(dim)
+        self.norm2 = nn.BatchNorm2d(dim_out)
         
         self.window_size = window_size
 
@@ -299,32 +301,26 @@ class ConvMultiScaleBlock(nn.Module):
         )
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
-        self.norm2 = norm_layer(dim_out)
-        
+        # MLP with Conv2d layers
         self.mlp = nn.Sequential(
-            nn.Linear(dim_out, int(dim_out * mlp_ratio)),
+            nn.Conv2d(dim_out, int(dim_out * mlp_ratio), kernel_size=1),
             act_layer(),
-            nn.Linear(int(dim_out * mlp_ratio), dim_out),
+            nn.Conv2d(int(dim_out * mlp_ratio), dim_out, kernel_size=1),
         )
 
         if dim != dim_out:
-            self.proj = nn.Linear(dim, dim_out)
+            self.proj = nn.Conv2d(dim, dim_out, kernel_size=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [B, H, W, C]
+        # x: [B, C, H, W]
         shortcut = x
         
         x = self.norm1(x)
-        
-        # Convert to NCHW for convolution operations
-        x = x.permute(0, 3, 1, 2)
 
         if self.dim != self.dim_out:
             shortcut = self.proj(shortcut)
             if self.pool:
-                shortcut = shortcut.permute(0, 3, 1, 2)
                 shortcut = self.pool(shortcut)
-                shortcut = shortcut.permute(0, 2, 3, 1)
 
         if self.window_size > 0:
             x, (Hp, Wp) = window_partition_nchw(x, self.window_size)
@@ -332,14 +328,14 @@ class ConvMultiScaleBlock(nn.Module):
         x = self.attn(x)
 
         if self.window_size > 0:
-            x = window_unpartition_nchw(x, self.window_size, (Hp, Wp), shortcut.shape[1:3])
+            x = window_unpartition_nchw(x, self.window_size, (Hp, Wp), shortcut.shape[2:])
 
-        # Convert back to NHWC
-        x = x.permute(0, 2, 3, 1)
-        
+        # Apply drop path and add shortcut
         x = shortcut + self.drop_path(x)
 
+        # MLP
         x = x + self.drop_path(self.mlp(self.norm2(x)))
+
         return x
 
 
