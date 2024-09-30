@@ -260,45 +260,38 @@ def main() -> None:
             # Calculate embedding loss
             embedding_loss: torch.Tensor = mse_criterion(moat_features, sam_features)
 
-            # Decode masks for MOAT
-            moat_masks, moat_scores, _ = moat_predictor.predict(
-                point_coords=batch_points.view(-1, 2),
-                point_labels=batch_labels.view(-1),
-                multimask_output=True,
-            )
+            # Decode masks for MOAT using predict_batch
+            with torch.no_grad():
+                moat_masks, moat_scores, _ = moat_predictor.predict_batch(
+                    point_coords_batch=batch_points.cpu().numpy(),
+                    point_labels_batch=batch_labels.cpu().numpy(),
+                    multimask_output=True,
+                )
 
-            # Convert moat_masks and moat_scores to PyTorch tensors if they're not already
-            moat_masks = torch.as_tensor(moat_masks).float().cuda()
-            moat_scores = torch.as_tensor(moat_scores).float().cuda()
+            # Convert moat_masks and moat_scores to PyTorch tensors
+            moat_masks = torch.as_tensor(np.stack(moat_masks)).float().cuda()
+            moat_scores = torch.as_tensor(np.stack(moat_scores)).float().cuda()
 
             # Get the number of masks returned by the model and in the batch
-            num_moat_masks = moat_masks.shape[0]
+            num_moat_masks = moat_masks.shape[1]
             num_batch_masks = batch_masks.shape[1]
             batch_size = batch_masks.shape[0]
-            # Sort batch_masks by their sum (as a simple heuristic for mask quality)
-            batch_masks_sum = batch_masks.sum(dim=(2, 3))
-            _, sorted_indices = torch.sort(batch_masks_sum, dim=1, descending=True)
 
             # Determine the number of masks to use
             num_masks_to_use = min(num_moat_masks, num_batch_masks)
 
             # Select the top N masks from batch_masks and MOAT masks
-            batch_masks_top_n = torch.stack([batch_masks[i, sorted_indices[i, :num_masks_to_use]] for i in range(batch_size)])
-            moat_masks_top_n = moat_masks[:num_masks_to_use]
+            batch_masks_top_n = batch_masks[:, :num_masks_to_use]
+            moat_masks_top_n = moat_masks[:, :num_masks_to_use]
 
-            # Ensure moat_masks_top_n has the same batch dimension as batch_masks_top_n
-            moat_masks_top_n = moat_masks_top_n.unsqueeze(0).expand(batch_size, -1, -1, -1)
             # Calculate mask loss (comparing MOAT masks with top N ground truth masks)
             mask_loss = bce_criterion(moat_masks_top_n, batch_masks_top_n)
 
-            # Adjust moat_scores if necessary
-            moat_scores_top_n = moat_scores[:num_masks_to_use].unsqueeze(0).expand(batch_size, -1)
-
-            # Calculate IoU loss (similar to TRAIN.py)
+            # Calculate IoU loss
             inter = (batch_masks_top_n * (moat_masks_top_n > 0.5)).sum((2, 3))
             union = batch_masks_top_n.sum((2, 3)) + (moat_masks_top_n > 0.5).sum((2, 3)) - inter
             iou = inter / (union + 1e-6)  # Add small epsilon to avoid division by zero
-            iou_loss = torch.abs(moat_scores_top_n - iou).mean()
+            iou_loss = torch.abs(moat_scores[:, :num_masks_to_use] - iou).mean()
 
             # Combine losses
             loss = embedding_loss + mask_loss + 0.05 * iou_loss
@@ -318,6 +311,7 @@ def main() -> None:
                 "iou_loss": iou_loss.item(),
                 "batch_duration": batch_duration
             })
+            break
 
         avg_loss: float = epoch_loss / num_batches
         
