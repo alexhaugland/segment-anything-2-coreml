@@ -93,6 +93,15 @@ def main() -> None:
     parser.add_argument("--checkpoint", type=str, default="checkpoints/sam2_hiera_tiny.pt", help="SAM2 checkpoint file")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume training")
     parser.add_argument("--save_dir", type=str, default="checkpoints", help="Directory to save checkpoints")
+    
+    # Add new arguments for MOAT hyperparameters
+    parser.add_argument("--moat_embed_dim", type=int, default=64, help="MOAT embedding dimension")
+    parser.add_argument("--moat_mlp_ratio", type=float, default=4.0, help="MOAT MLP ratio")
+    parser.add_argument("--moat_depths", nargs='+', type=int, default=[2, 2, 2, 2], help="MOAT depths for each stage")
+    parser.add_argument("--moat_num_heads", nargs='+', type=int, default=[1, 2, 4, 8], help="MOAT number of heads for each stage")
+    parser.add_argument("--moat_drop_path_rate", type=float, default=0.1, help="MOAT drop path rate")
+    parser.add_argument("--optimizer", type=str, default="adam", choices=['adam', 'adamw', 'sgd'], help="Optimizer to use")
+    parser.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay for optimizer")
 
     args = parser.parse_args()
 
@@ -105,18 +114,29 @@ def main() -> None:
 
     # Create SAM model
     sam_predictor: SAM2ImagePredictor = create_sam_model(args.model_cfg, args.checkpoint)
-
     sam_predictor.model.image_encoder.float()
 
     moat_predictor: SAM2ImagePredictor = create_sam_model(args.model_cfg, args.checkpoint)
 
-    # Create MOAT image encoder
-    moat_image_encoder: nn.Module = build_moat_image_encoder().cuda()
+    # Create MOAT image encoder with new hyperparameters
+    moat_image_encoder: nn.Module = build_moat_image_encoder(
+        embed_dim=args.moat_embed_dim,
+        mlp_ratio=args.moat_mlp_ratio,
+        depths=args.moat_depths,
+        num_heads=args.moat_num_heads,
+        drop_path_rate=args.moat_drop_path_rate
+    ).cuda()
     moat_image_encoder.float()
     moat_predictor.model.image_encoder = moat_image_encoder
     
-    # Optimize only the parameters of moat_image_encoder
-    optimizer = torch.optim.Adam(moat_image_encoder.parameters(), lr=args.lr)
+    # Set up optimizer based on the chosen type
+    if args.optimizer == 'adam':
+        optimizer = torch.optim.Adam(moat_image_encoder.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    elif args.optimizer == 'adamw':
+        optimizer = torch.optim.AdamW(moat_image_encoder.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    elif args.optimizer == 'sgd':
+        optimizer = torch.optim.SGD(moat_image_encoder.parameters(), lr=args.lr, momentum=0.9, weight_decay=args.weight_decay)
+    
     criterion = nn.MSELoss()
     
     # Resume from checkpoint if specified
