@@ -10,6 +10,7 @@ import torch.backends.cudnn as cudnn
 import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image
+import glob
 
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 from sam2.modeling.backbones.moat_hiera import build_moat_image_encoder
@@ -152,10 +153,12 @@ def main() -> None:
         else:
             print(f"No checkpoint found at '{args.resume}'")
     
+    run_id = wandb.util.generate_id()
     wandb.init(
         project="moat_sam_image_encoder_distillation",
         config=vars(args),
-        name=f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+        name=f"run_{run_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+        id=run_id,
     )
     
     # Initialize the SAV dataset
@@ -171,6 +174,8 @@ def main() -> None:
     # Define point prompts for the truck image
     truck_points = np.array([[[500, 375]]])
     truck_labels = np.array([[1]])
+
+    latest_checkpoint_path = None
 
     for epoch in range(start_epoch, args.epochs):
         start_time: float = time.time()
@@ -202,25 +207,20 @@ def main() -> None:
         avg_loss: float = epoch_loss / num_batches
         
         print(f"Epoch [{epoch+1}/{args.epochs}], Average Loss: {avg_loss:.4f}")
+        
+        # Save the latest checkpoint, overwriting the previous one
+        latest_checkpoint_path = os.path.join(args.save_dir, f"moat_image_encoder_checkpoint_{run_id}.pt")
         checkpoint: dict = {
             'epoch': epoch + 1,
             'state_dict': moat_image_encoder.state_dict(),
             'optimizer': optimizer.state_dict(),
         }
-        torch.save(checkpoint, os.path.join(args.save_dir, f"moat_image_encoder_checkpoint_epoch_{epoch+1}.pt"))
+        torch.save(checkpoint, latest_checkpoint_path)
         
         # Generate and log debug images
         generate_and_log_debug_images(epoch, sam_predictor, moat_predictor, truck_image, truck_points, truck_labels)
 
     print("Training completed.")
-    
-    final_checkpoint: dict = {
-        'epoch': args.epochs,
-        'state_dict': moat_image_encoder.state_dict(),
-        'optimizer': optimizer.state_dict(),
-    }
-    torch.save(final_checkpoint, os.path.join(args.save_dir, "trained_moat_image_encoder.pt"))
-    print(f"Trained MOAT image encoder saved to {os.path.join(args.save_dir, 'trained_moat_image_encoder.pt')}")
 
 if __name__ == "__main__":
     main()
