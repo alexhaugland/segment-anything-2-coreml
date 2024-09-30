@@ -12,3 +12,4 @@ wandb/*
 model*.torch
 *.mlpackage
 *.pt
+debug_images/

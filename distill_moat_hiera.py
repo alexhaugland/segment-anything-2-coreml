@@ -95,11 +95,7 @@ def main() -> None:
     parser.add_argument("--save_dir", type=str, default="checkpoints", help="Directory to save checkpoints")
 
     args = parser.parse_args()
-    # Set environment variables
-    os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
-    os.environ['TORCH_USE_CUDA_DSA'] = '0'
-    # os.environ['TORCH_CUDNN_SDPA_ENABLED'] = '1'
-    
+
     cudnn.benchmark = False
     torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
     if torch.cuda.get_device_properties(0).major >= 8:
