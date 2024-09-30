@@ -98,20 +98,26 @@ def main() -> None:
     # Set environment variables
     os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
     os.environ['TORCH_USE_CUDA_DSA'] = '0'
-    os.environ['TORCH_CUDNN_SDPA_ENABLED'] = '1'
+    # os.environ['TORCH_CUDNN_SDPA_ENABLED'] = '1'
     
     cudnn.benchmark = False
+    torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
+    if torch.cuda.get_device_properties(0).major >= 8:
+        # turn on tfloat32 for Ampere GPUs (https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices)
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
     # Create SAM model
     sam_predictor: SAM2ImagePredictor = create_sam_model(args.model_cfg, args.checkpoint)
+
+    sam_predictor.model.image_encoder.float()
+
     moat_predictor: SAM2ImagePredictor = create_sam_model(args.model_cfg, args.checkpoint)
 
     # Create MOAT image encoder
     moat_image_encoder: nn.Module = build_moat_image_encoder().cuda()
-    moat_predictor.model.image_encoder = moat_image_encoder
-    # Ensure both models are in the same precision (float32)
-    sam_predictor.model.float()
     moat_image_encoder.float()
+    moat_predictor.model.image_encoder = moat_image_encoder
     
     # Optimize only the parameters of moat_image_encoder
     optimizer = torch.optim.Adam(moat_image_encoder.parameters(), lr=args.lr)
@@ -175,6 +181,7 @@ def main() -> None:
             num_batches += 1
             batch_duration: float = time.time() - start_time
             wandb.log({"epoch": epoch + 1, "num_batches": num_batches, "loss": loss.item(), "batch_duration": batch_duration})
+            break
 
         avg_loss: float = epoch_loss / num_batches
         
