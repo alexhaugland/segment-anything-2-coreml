@@ -6,28 +6,25 @@ import os
 import torch.backends.cudnn as cudnn
 from sam2.build_sam import build_sam2
 from sam2.sam2_image_predictor import SAM2ImagePredictor
-from moat_hiera import build_moat_image_encoder, MOATWithMerge
+from distill_moat_hiera import build_moat_image_encoder
 
 def main():
     parser = argparse.ArgumentParser(description="Test SAM2 with MOAT-Hiera image encoder")
     parser.add_argument("--model_cfg", type=str, default="sam2_hiera_t.yaml", help="SAM2 model configuration file")
     parser.add_argument("--sam2_checkpoint", type=str, default="checkpoints/sam2_hiera_tiny.pt", help="SAM2 checkpoint file")
-    parser.add_argument("--moat_checkpoint", type=str, default="checkpoints/moat_image_encoder_checkpoint_epoch_1.pt", help="MOAT-Hiera checkpoint file")
+    parser.add_argument("--moat_checkpoint", type=str, default="checkpoints/moat_image_encoder_checkpoint_epoch_2.pt", help="MOAT-Hiera checkpoint file")
     parser.add_argument("--image_path", type=str, default="./notebooks/images/truck.jpg", help="Path to the input image")
     args = parser.parse_args()
 
-    os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
-    os.environ['TORCH_USE_CUDA_DSA'] = '0'
-    os.environ['TORCH_CUDNN_SDPA_ENABLED'] = '1'
-    
-    cudnn.benchmark = False
+    torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
+
 
     if not os.path.exists(args.image_path):
         print(f"Default image not found at {args.image_path}. Please provide a valid image path.")
         return
 
     # Load SAM2 model
-    sam2_model = build_sam2(args.model_cfg, args.sam2_checkpoint, device="cuda")
+    sam2_model = build_sam2(args.model_cfg, args.sam2_checkpoint)
     predictor = SAM2ImagePredictor(sam2_model)
 
     # Load MOAT-Hiera image encoder
