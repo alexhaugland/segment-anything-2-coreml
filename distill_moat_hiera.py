@@ -14,7 +14,7 @@ import glob
 
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 from sam2.modeling.backbones.moat_hiera import build_moat_image_encoder
-
+from sam2.modeling.vision_transformers.model import PEType
 # Reuse dataset loading code from transfermer.py
 from transfermer import SAVTorchDataset, create_sam_model
 
@@ -95,16 +95,29 @@ def main() -> None:
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume training")
     parser.add_argument("--save_dir", type=str, default="checkpoints", help="Directory to save checkpoints")
     
-    # Add new arguments for MOAT hyperparameters
-    parser.add_argument("--moat_embed_dim", type=int, default=64, help="MOAT embedding dimension")
-    parser.add_argument("--moat_mlp_ratio", type=float, default=4.0, help="MOAT MLP ratio")
-    parser.add_argument("--moat_depths", nargs='+', type=int, default=[2, 2, 2, 2], help="MOAT depths for each stage")
-    parser.add_argument("--moat_num_heads", nargs='+', type=int, default=[1, 2, 4, 8], help="MOAT number of heads for each stage")
-    parser.add_argument("--moat_drop_path_rate", type=float, default=0.1, help="MOAT drop path rate")
+    # MOAT hyperparameters
+    parser.add_argument("--image_size", type=int, default=1024, help="Input image size")
+    parser.add_argument("--base_arch", type=str, default="tiny-moat-2", choices=["tiny-moat-0", "tiny-moat-1", "tiny-moat-2"], help="Base architecture for MOAT")
+    parser.add_argument("--attention_mode", type=str, default="global", choices=["global", "local"], help="Attention mode for MOAT")
+    parser.add_argument("--split_head", type=bool, default=True, help="Whether to split head in attention")
+    parser.add_argument("--output_stride", type=int, default=32, choices=[16, 32], help="Output stride for MOAT")
+    parser.add_argument("--num_blocks", nargs='+', type=int, default=[2, 2, 2, 2], help="Number of blocks for each stage in MOAT")
+    parser.add_argument("--mbconv_block_expand_ratio", type=int, default=4, help="Expansion ratio for MBConv blocks")
+    parser.add_argument("--moat_block_expand_ratio", type=int, default=4, help="Expansion ratio for MOAT blocks")
+    
     parser.add_argument("--optimizer", type=str, default="adam", choices=['adam', 'adamw', 'sgd'], help="Optimizer to use")
     parser.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay for optimizer")
 
     args = parser.parse_args()
+
+    # Initialize wandb
+    run = wandb.init(project="moat_sam_image_encoder_distillation", config=vars(args))
+
+    # Override args with wandb config
+    config = wandb.config
+    for key, value in config.items():
+        if hasattr(args, key):
+            setattr(args, key, value)
 
     cudnn.benchmark = False
     torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
@@ -121,11 +134,15 @@ def main() -> None:
 
     # Create MOAT image encoder with new hyperparameters
     moat_image_encoder: nn.Module = build_moat_image_encoder(
-        embed_dim=args.moat_embed_dim,
-        mlp_ratio=args.moat_mlp_ratio,
-        depths=args.moat_depths,
-        num_heads=args.moat_num_heads,
-        drop_path_rate=args.moat_drop_path_rate
+        image_size=args.image_size,
+        base_arch=args.base_arch,
+        attention_mode=args.attention_mode,
+        split_head=args.split_head,
+        output_stride=args.output_stride,
+        num_blocks=args.num_blocks,
+        mbconv_block_expand_ratio=args.mbconv_block_expand_ratio,
+        moat_block_expand_ratio=args.moat_block_expand_ratio,
+        pe_type=PEType.LePE_ADD
     ).cuda()
     moat_image_encoder.float()
     moat_predictor.model.image_encoder = moat_image_encoder
@@ -202,7 +219,6 @@ def main() -> None:
             num_batches += 1
             batch_duration: float = time.time() - start_time
             wandb.log({"epoch": epoch + 1, "num_batches": num_batches, "loss": loss.item(), "batch_duration": batch_duration})
-            break
 
         avg_loss: float = epoch_loss / num_batches
         

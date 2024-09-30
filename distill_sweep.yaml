@@ -3,6 +3,11 @@ method: bayes
 metric:
   name: loss
   goal: minimize
+early_terminate:
+  type: hyperband
+  min_iter: 3
+  max_iter: 15
+  eta: 3
 parameters:
   epochs:
     values: [5, 10, 15]
@@ -12,36 +17,27 @@ parameters:
     distribution: log_uniform_values
     min: 1e-5
     max: 1e-3
-  moat_embed_dim:
-    values: [32, 64, 128]
-  moat_mlp_ratio:
-    values: [3, 4, 5]
-  moat_depths:
+  base_arch:
+    values: ["tiny-moat-2"]
+  attention_mode:
+    values: ["global", "local"]
+  split_head:
+    values: [true, false]
+  output_stride:
+    values: [16, 32]
+  num_blocks:
     values: [[2, 2, 2, 2], [3, 3, 3, 3], [4, 4, 4, 4]]
-  moat_num_heads:
-    values: [[1, 2, 4, 8], [2, 4, 8, 16]]
-  moat_drop_path_rate:
-    distribution: uniform
-    min: 0.0
-    max: 0.3
+  mbconv_block_expand_ratio:
+    values: [3, 4, 5]
+  moat_block_expand_ratio:
+    values: [3, 4, 5]
   optimizer:
     values: ['adam', 'adamw', 'sgd']
   weight_decay:
     distribution: log_uniform_values
     min: 1e-5
     max: 1e-2
-
 command:
   - ${env}
   - ${interpreter}
   - ${program}
-  - --epochs=${epochs}
-  - --batch_size=${batch_size}
-  - --lr=${lr}
-  - --moat_embed_dim=${moat_embed_dim}
-  - --moat_mlp_ratio=${moat_mlp_ratio}
-  - --moat_depths=${moat_depths}
-  - --moat_num_heads=${moat_num_heads}
-  - --moat_drop_path_rate=${moat_drop_path_rate}
-  - --optimizer=${optimizer}
-  - --weight_decay=${weight_decay}
