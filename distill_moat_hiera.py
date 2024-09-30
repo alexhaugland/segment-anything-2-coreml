@@ -311,7 +311,6 @@ def main() -> None:
                 "iou_loss": iou_loss.item(),
                 "batch_duration": batch_duration
             })
-            break
 
         avg_loss: float = epoch_loss / num_batches
         
