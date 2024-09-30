@@ -15,6 +15,7 @@ from torch.utils.data import DataLoader
 from sav_dataset.utils.sav_utils import SAVDataset
 import cv2
 import torch.nn.functional as F
+import pycocotools.mask as mask_util
 
 parser = argparse.ArgumentParser(description="Train a MOAT block to match SAM2 output")
 parser.add_argument("--epochs", type=int, default=10000, help="Number of training epochs")
@@ -102,8 +103,86 @@ class SAVTorchDataset(Dataset):
 
     def __getitem__(self, index):
         video_id = self.video_ids[index]
-        video = read_video(video_id, self.dataset)
-        return video
+        frames, manual_annot, auto_annot = self.dataset.get_frames_and_annotations(video_id)
+
+        if frames is None or (auto_annot is None and manual_annot is None):
+            return None
+
+        # Randomly select a frame
+        frame_idx = np.random.randint(len(frames))
+        Img = frames[frame_idx]
+        r = np.min([1024 / Img.shape[1], 1024 / Img.shape[0]])  # scaling factor
+        Img = cv2.resize(Img, (int(Img.shape[1] * r), int(Img.shape[0] * r)))
+        orig_shape = Img.shape
+
+        # Prefer auto masks, fall back to manual if auto is not available
+        if auto_annot is not None and "masklet" in auto_annot and len(auto_annot["masklet"]) > frame_idx:
+            rles = auto_annot["masklet"][frame_idx]
+        elif manual_annot is not None and "masklet" in manual_annot and len(manual_annot["masklet"]) > frame_idx:
+            rles = manual_annot["masklet"][frame_idx]
+        else:
+            return None
+
+        masks = [mask_util.decode(rle) for rle in rles]
+
+        # Ensure all masks have the same shape and resize them
+        H, W = orig_shape[:2]
+        valid_masks = [
+            cv2.resize(mask, (W, H), interpolation=cv2.INTER_NEAREST)
+            for mask in masks if mask.any()
+        ]
+
+        # Pad the image and masks to 1024x1024
+        if Img.shape[0] < 1024:
+            Img = np.concatenate(
+                [Img, np.zeros([1024 - Img.shape[0], Img.shape[1], 3], dtype=np.uint8)],
+                axis=0,
+            )
+            valid_masks = [
+                np.concatenate(
+                    [mask, np.zeros([1024 - mask.shape[0], mask.shape[1]], dtype=np.uint8)],
+                    axis=0,
+                )
+                for mask in valid_masks
+            ]
+        if Img.shape[1] < 1024:
+            Img = np.concatenate(
+                [Img, np.zeros([Img.shape[0], 1024 - Img.shape[1], 3], dtype=np.uint8)],
+                axis=1,
+            )
+            valid_masks = [
+                np.concatenate(
+                    [mask, np.zeros([mask.shape[0], 1024 - mask.shape[1]], dtype=np.uint8)],
+                    axis=1,
+                )
+                for mask in valid_masks
+            ]
+
+        # Generate points for each mask
+        points = []
+        for mask in valid_masks:
+            coords = np.argwhere(mask > 0)
+            if len(coords) > 0:
+                yx = coords[np.random.randint(len(coords))]
+                points.append([yx[1], yx[0]])
+
+        # If there are no valid masks or points, return None
+        if not valid_masks or not points:
+            return None
+
+        # Convert image to tensor
+        Img = torch.from_numpy(Img).permute(2, 0, 1).float() / 255.0
+
+        # Convert masks to tensor (all masks in one tensor)
+        masks_tensor = torch.stack([torch.from_numpy(mask).float() for mask in valid_masks])
+
+        # Convert points to tensor
+        points_tensor = torch.tensor(points).float()
+
+        # Create labels tensor (all 1 for positive points)
+        labels_tensor = torch.ones(len(points)).long()
+
+        return Img, masks_tensor, points_tensor, labels_tensor
 
 def reduce_precision(module):
     for param in module.parameters():

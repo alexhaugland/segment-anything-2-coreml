@@ -11,6 +11,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image
 import glob
+import torch.nn.functional as F
 
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 from sam2.modeling.backbones.moat_hiera import build_moat_image_encoder
@@ -85,6 +86,39 @@ def generate_and_log_debug_images(epoch, sam_predictor, moat_predictor, truck_im
     plt.close(fig_sam)
     plt.close(fig_moat)
 
+def collate_fn(batch):
+    batch = list(filter(lambda x: x is not None, batch))
+    if len(batch) == 0:
+        return None
+    
+    images, masks, points, labels = zip(*batch)
+    
+    # Stack images (they should all be the same size)
+    images = torch.stack(images)
+    
+    # Pad masks to the maximum number of masks in the batch
+    max_masks = max(m.shape[0] for m in masks)
+    padded_masks = []
+    for mask in masks:
+        pad_size = max_masks - mask.shape[0]
+        padded_mask = F.pad(mask, (0, 0, 0, 0, 0, pad_size))
+        padded_masks.append(padded_mask)
+    masks = torch.stack(padded_masks)
+    
+    # Pad points and labels similarly
+    padded_points = []
+    padded_labels = []
+    for p, l in zip(points, labels):
+        pad_size = max_masks - p.shape[0]
+        padded_point = F.pad(p, (0, 0, 0, pad_size))
+        padded_points.append(padded_point)
+        padded_label = F.pad(l, (0, pad_size), value=-1)  # Use -1 as padding value for labels
+        padded_labels.append(padded_label)
+    points = torch.stack(padded_points)
+    labels = torch.stack(padded_labels)
+    
+    return images, masks, points, labels
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Distill SAM2 image encoder into MOAT blocks")
     parser.add_argument("--epochs", type=int, default=10000, help="Number of training epochs")
@@ -155,7 +189,9 @@ def main() -> None:
     elif args.optimizer == 'sgd':
         optimizer = torch.optim.SGD(moat_image_encoder.parameters(), lr=args.lr, momentum=0.9, weight_decay=args.weight_decay)
     
-    criterion = nn.MSELoss()
+    # Modify the loss function
+    mse_criterion = nn.MSELoss()
+    bce_criterion = nn.BCEWithLogitsLoss()
     
     # Resume from checkpoint if specified
     start_epoch: int = 0
@@ -181,7 +217,7 @@ def main() -> None:
     # Initialize the SAV dataset
     sav_dir: str = os.path.expanduser("~/mldata/sav_000")  # Update this path if necessary
     dataset: SAVTorchDataset = SAVTorchDataset(sav_dir)
-    dataloader: DataLoader = DataLoader(dataset, batch_size=args.batch_size, num_workers=4, shuffle=True)
+    dataloader: DataLoader = DataLoader(dataset, batch_size=args.batch_size, num_workers=4, shuffle=True, collate_fn=collate_fn)
 
     os.makedirs(args.save_dir, exist_ok=True)
 
@@ -199,18 +235,73 @@ def main() -> None:
         epoch_loss: float = 0.0
         num_batches: int = 0
 
-        for batch_images in dataloader:            
+        for batch in dataloader:
+            if batch is None:
+                continue
+
+            batch_images, batch_masks, batch_points, batch_labels = batch
+
+            # Convert batch_images from tensor to list of numpy arrays
+            batch_images_list = [img.permute(1, 2, 0).cpu().numpy() for img in batch_images]
+
+            batch_masks = batch_masks.cuda()
+            batch_points = batch_points.cuda()
+            batch_labels = batch_labels.cuda()
+
             optimizer.zero_grad()
-            batch_images = [img.numpy() for img in batch_images]
             
             with torch.no_grad():
-                sam_predictor.set_image_batch(batch_images)
+                sam_predictor.set_image_batch(batch_images_list)
             sam_features = sam_predictor._features["image_embed"]
             
-            moat_predictor.set_image_batch(batch_images)
+            moat_predictor.set_image_batch(batch_images_list)
             moat_features = moat_predictor._features["image_embed"]
             
-            loss: torch.Tensor = criterion(moat_features, sam_features)
+            # Calculate embedding loss
+            embedding_loss: torch.Tensor = mse_criterion(moat_features, sam_features)
+
+            # Decode masks for MOAT
+            moat_masks, moat_scores, _ = moat_predictor.predict(
+                point_coords=batch_points.view(-1, 2),
+                point_labels=batch_labels.view(-1),
+                multimask_output=True,
+            )
+
+            # Convert moat_masks and moat_scores to PyTorch tensors if they're not already
+            moat_masks = torch.as_tensor(moat_masks).float().cuda()
+            moat_scores = torch.as_tensor(moat_scores).float().cuda()
+
+            # Get the number of masks returned by the model and in the batch
+            num_moat_masks = moat_masks.shape[0]
+            num_batch_masks = batch_masks.shape[1]
+            batch_size = batch_masks.shape[0]
+            # Sort batch_masks by their sum (as a simple heuristic for mask quality)
+            batch_masks_sum = batch_masks.sum(dim=(2, 3))
+            _, sorted_indices = torch.sort(batch_masks_sum, dim=1, descending=True)
+
+            # Determine the number of masks to use
+            num_masks_to_use = min(num_moat_masks, num_batch_masks)
+
+            # Select the top N masks from batch_masks and MOAT masks
+            batch_masks_top_n = torch.stack([batch_masks[i, sorted_indices[i, :num_masks_to_use]] for i in range(batch_size)])
+            moat_masks_top_n = moat_masks[:num_masks_to_use]
+
+            # Ensure moat_masks_top_n has the same batch dimension as batch_masks_top_n
+            moat_masks_top_n = moat_masks_top_n.unsqueeze(0).expand(batch_size, -1, -1, -1)
+            # Calculate mask loss (comparing MOAT masks with top N ground truth masks)
+            mask_loss = bce_criterion(moat_masks_top_n, batch_masks_top_n)
+
+            # Adjust moat_scores if necessary
+            moat_scores_top_n = moat_scores[:num_masks_to_use].unsqueeze(0).expand(batch_size, -1)
+
+            # Calculate IoU loss (similar to TRAIN.py)
+            inter = (batch_masks_top_n * (moat_masks_top_n > 0.5)).sum((2, 3))
+            union = batch_masks_top_n.sum((2, 3)) + (moat_masks_top_n > 0.5).sum((2, 3)) - inter
+            iou = inter / (union + 1e-6)  # Add small epsilon to avoid division by zero
+            iou_loss = torch.abs(moat_scores_top_n - iou).mean()
+
+            # Combine losses
+            loss = embedding_loss + mask_loss + 0.05 * iou_loss
 
             loss.backward()
             optimizer.step()
@@ -218,7 +309,15 @@ def main() -> None:
             epoch_loss += loss.item()
             num_batches += 1
             batch_duration: float = time.time() - start_time
-            wandb.log({"epoch": epoch + 1, "num_batches": num_batches, "loss": loss.item(), "batch_duration": batch_duration})
+            wandb.log({
+                "epoch": epoch + 1,
+                "num_batches": num_batches,
+                "total_loss": loss.item(),
+                "embedding_loss": embedding_loss.item(),
+                "mask_loss": mask_loss.item(),
+                "iou_loss": iou_loss.item(),
+                "batch_duration": batch_duration
+            })
 
         avg_loss: float = epoch_loss / num_batches
         
@@ -233,7 +332,6 @@ def main() -> None:
         }
         torch.save(checkpoint, latest_checkpoint_path)
         
-        # Generate and log debug images
         generate_and_log_debug_images(epoch, sam_predictor, moat_predictor, truck_image, truck_points, truck_labels)
 
     print("Training completed.")
