@@ -7,12 +7,82 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 import wandb
 import torch.backends.cudnn as cudnn
+import numpy as np
+import matplotlib.pyplot as plt
+from PIL import Image
 
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 from sam2.modeling.backbones.moat_hiera import build_moat_image_encoder
 
 # Reuse dataset loading code from transfermer.py
 from transfermer import SAVTorchDataset, create_sam_model
+
+def show_mask(mask, ax, random_color=False):
+    if random_color:
+        color = np.concatenate([np.random.random(3), np.array([0.6])], axis=0)
+    else:
+        color = np.array([30/255, 144/255, 255/255, 0.6])
+    h, w = mask.shape[-2:]
+    mask_image = mask.reshape(h, w, 1) * color.reshape(1, 1, -1)
+    ax.imshow(mask_image)
+
+def show_points(coords, labels, ax, marker_size=375):
+    pos_points = coords[labels==1]
+    neg_points = coords[labels==0]
+    ax.scatter(pos_points[:, 0], pos_points[:, 1], color='green', marker='*', s=marker_size, edgecolor='white', linewidth=1.25)
+    ax.scatter(neg_points[:, 0], neg_points[:, 1], color='red', marker='*', s=marker_size, edgecolor='white', linewidth=1.25)   
+
+def generate_and_log_debug_images(epoch, sam_predictor, moat_predictor, truck_image, truck_points, truck_labels):
+    with torch.no_grad():
+        sam_predictor.set_image(truck_image)
+        sam_masks, sam_scores, _ = sam_predictor.predict(
+            point_coords=truck_points,
+            point_labels=truck_labels,
+            multimask_output=True,
+        )
+        
+        moat_predictor.set_image(truck_image)
+        moat_masks, moat_scores, _ = moat_predictor.predict(
+            point_coords=truck_points,
+            point_labels=truck_labels,
+            multimask_output=True,
+        )
+
+    # Select the best mask for each model
+    sam_best_mask = sam_masks[np.argmax(sam_scores)]
+    moat_best_mask = moat_masks[np.argmax(moat_scores)]
+
+    # Create separate figures for SAM and MOAT masks
+    fig_sam, ax_sam = plt.subplots(figsize=(10, 10))
+    fig_moat, ax_moat = plt.subplots(figsize=(10, 10))
+
+    # Plot SAM mask
+    ax_sam.imshow(truck_image)
+    show_mask(sam_best_mask, ax_sam)
+    show_points(truck_points, truck_labels, ax_sam)
+    ax_sam.set_title("SAM Mask")
+
+    # Plot MOAT mask
+    ax_moat.imshow(truck_image)
+    show_mask(moat_best_mask, ax_moat)
+    show_points(truck_points, truck_labels, ax_moat)
+    ax_moat.set_title("MOAT Mask")
+
+    # Save the figures and log to wandb
+    sam_image_path = f"debug_images/sam_mask_epoch_{epoch+1}.png"
+    moat_image_path = f"debug_images/moat_mask_epoch_{epoch+1}.png"
+    
+    fig_sam.savefig(sam_image_path)
+    fig_moat.savefig(moat_image_path)
+    
+    wandb.log({
+        "SAM_mask": wandb.Image(sam_image_path),
+        "MOAT_mask": wandb.Image(moat_image_path),
+        "epoch": epoch + 1,
+    })
+    
+    plt.close(fig_sam)
+    plt.close(fig_moat)
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Distill SAM2 image encoder into MOAT blocks")
@@ -73,6 +143,13 @@ def main() -> None:
 
     os.makedirs(args.save_dir, exist_ok=True)
 
+    # Load the truck image
+    truck_image = np.array(Image.open("notebooks/images/truck.jpg"))
+    
+    # Define point prompts for the truck image
+    truck_points = np.array([[[500, 375]]])
+    truck_labels = np.array([[1]])
+
     for epoch in range(start_epoch, args.epochs):
         start_time: float = time.time()
         epoch_loss: float = 0.0
@@ -108,7 +185,10 @@ def main() -> None:
             'optimizer': optimizer.state_dict(),
         }
         torch.save(checkpoint, os.path.join(args.save_dir, f"moat_image_encoder_checkpoint_epoch_{epoch+1}.pt"))
-    
+        
+        # Generate and log debug images
+        generate_and_log_debug_images(epoch, sam_predictor, moat_predictor, truck_image, truck_points, truck_labels)
+
     print("Training completed.")
     
     final_checkpoint: dict = {
